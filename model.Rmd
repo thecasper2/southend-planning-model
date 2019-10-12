@@ -1,0 +1,137 @@
+---
+title: "Southend Planning Permission Model"
+output: html_notebook
+---
+
+```{r libraries}
+library(data.table)
+library(magrittr)
+library(ggplot2)
+library(gender)
+library(caret)
+library(neuralnet)
+```
+
+```{r read_data}
+data <- read.csv("details.csv") %>% as.data.table()
+data[, X:=NULL]
+data <- data[Decision != "Withdrawn"]
+```
+
+```{r features}
+# Temp reread
+data <- read.csv("details.csv") %>% as.data.table()
+data[, X:=NULL]
+data <- data[Decision != "Withdrawn"]
+
+# Label
+success <- paste(c("Allow", "Non Conditional", "Grant", "No Objection"), collapse="|")
+failure <- paste(c("Refusal", "Refuse"), collapse="|")
+data[grepl(success, Decision), label:= "approved"]
+data[grepl(failure, Decision), label:= "rejected"]
+
+# Case officer gender
+case_officers <- data.table(Case.Officer=levels(data$Case.Officer))
+case_officers[, first_name := gsub(" .*$","",as.character(Case.Officer))]
+case_officers[, Case.Officer.Male := gender(first_name)$proportion_male]
+case_officers[, first_name := NULL]
+data <- data[case_officers, on="Case.Officer"]
+
+# Applicant gender
+male <- paste(c("Mr "), collapse="|")
+female <- paste(c("Mrs ", "Miss", "Ms "), collapse="|")
+couple <- paste(c("Mr & Mrs", "Mr And Mrs"), collapse="|")
+data[grepl(male, Applicant.Name), Applicant.Male := 1]
+data[grepl(female, Applicant.Name), Applicant.Male := 0]
+data[grepl(couple, Applicant.Name), Applicant.Male := NA]
+
+# Using agent
+data[, Using.Agent := ifelse(Agent.Name == "", 0, 1)]
+```
+
+```{r test_train}
+# Set seed
+set.seed(123)
+
+# Reorder
+reordered_data <- data[order(rnorm(nrow(data)))]
+
+# Extract features only
+data_features <- reordered_data[,c("Application.Type", "Case.Officer", "Ward", "Case.Officer.Male", "Applicant.Male", "Using.Agent", "label")]
+
+# One-hot encode categorical variables
+data_features <- cbind(
+    data_features,
+    predict(dummyVars(~Application.Type, data=data_features), newdata=data_features),
+    predict(dummyVars(~Case.Officer, data=data_features), newdata=data_features),
+    predict(dummyVars(~Ward, data=data_features), newdata=data_features)
+)
+data_features[, Application.Type:=NULL]
+data_features[, Case.Officer:=NULL]
+data_features[, Ward:=NULL]
+
+# Remove any remaining NA
+data_features <- na.omit(data_features)
+
+# Clean up column names
+colnames(data_features) <- make.names(colnames(data_features), unique=TRUE)
+
+# Set label as factor
+data_features[, label := as.factor(label)]
+
+# Split into train and test
+split = 0.75
+trainset <- head(data_features, nrow(data_features)*split)
+testset <- tail(data_features, nrow(data_features)*(1-split))
+```
+
+```{r train_neuralnet}
+nn <- neuralnet(
+  label ~ .,
+  data=trainset,
+  hidden=c(30, 30, 30, 30, 30),
+  linear.output=FALSE,
+  threshold=0.001
+)
+```
+
+```{r evaluate_neuralnet}
+nn.predict <- data.frame(compute(nn, testset)$net.result)
+colnames(nn.predict) <- c("approved", "rejected")
+results <- data.frame(
+  actual = subset(testset, select = "label"), 
+  prediction = nn.predict$net.result
+)
+roundedresults <- sapply(results, round, digits=0)
+roundedresultsdf <- data.frame(roundedresults)
+attach(roundedresultsdf)
+table(label,prediction)
+```
+
+
+```{r case_officer_sex_plots}
+data_plot <- data
+data_plot[, Case.Officer.Sex := ifelse(Case.Officer.Male >0.5, "Male", "Female")]
+data_plot <- data_plot[, .(percent = sum(label)*100/.N, cases = .N, success = sum(label)), by=c("Case.Officer.Sex")]
+ggplot(data_plot, aes(x=Case.Officer.Sex, y=percent)) +
+    geom_bar(stat="identity", fill="Navy") +
+    geom_label(aes(label=paste(cases, "cases"))) +
+    theme_bw() +
+    labs(x="Case officer sex", y="Applications approved (%)", title="Application approval by sex")
+```
+
+```{r ggally}
+data_gally <- data[,c("Application.Type", "Case.Officer", "Ward", "Case.Officer.Male", "Applicant.Male", "Using.Agent", "label")]
+data_gally[, Case.Officer.Male := Case.Officer.Male > 0.5]
+data_gally[, Applicant.Male := Applicant.Male > 0.5]
+data_gally[, Using.Agent := Using.Agent > 0.5]
+data_gally[, label := label > 0.5]
+gally_plot <- melt(data_gally, id="label")
+gally_plot[, variable := as.factor(variable)]
+gally <- ggplot(gally_plot, aes(x=value, fill=label)) +
+    geom_histogram(stat="count") +
+    theme_bw() +
+    facet_grid(~variable, scales="free_x") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
