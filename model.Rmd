@@ -77,10 +77,10 @@ data <- data[label %in% c(0, 1)]
 
 To make it simple we will take the decision text and assign the following labels:
 
-- 0 if the label contains `r print(success)`
-- 1 if the label contains `r print(failure)`
+- 0 if the label contains `r success`
+- 1 if the label contains `r failure`
 
-Where 0 denotes a successful application, and 1 denotes a rejection. This may seem counter intuative, but we see in the next section why this is important.
+Where 0 denotes a successful application, and 1 denotes a rejection. This may seem counter intuitive, but we see in the next section why this is important.
 
 #### Target skew
 
@@ -157,7 +157,7 @@ total_rejection <- nrow(data[label==1])
 total_acceptance <- nrow(data[label==0])
 ```
 
-What we know currently is that approximately `r print(round(total_rejection/total_rejection+total_acceptance))`% of applications are rejected. Given each word's prevalance in accepted and rejected applications, we can see if a word contributes more or less to a rejection. For this we construct the "rejection index" metric, where a value greater than 0 means a word is more likely to lead to a rejection, and less than 0 for less likely.
+What we know currently is that approximately **`r round(total_rejection/total_rejection+total_acceptance)`%** of applications are rejected. Given each word's prevalence in accepted and rejected applications, we can see if a word contributes more or less to a rejection. For this we construct the "rejection index" metric, where a value greater than 0 means a word is more likely to lead to a rejection, and less than 0 for less likely.
 
 Given that this follows a binomial pattern (successes and failures), we can also perform a fisher's exact test on each word to see the significance (p value) in the difference between the word and the average rejection rate. We can then filter to words that contribute a significant difference. Note that a low p-value means high significance (see the [Wikipedia page for Fisher's exact test](https://en.wikipedia.org/wiki/Fisher%27s_exact_test) for more information).
 
@@ -304,7 +304,7 @@ trainset <- split_data[[1]]
 testset <- split_data[[2]]
 ```
 
-We split the data into `r round(split*100)`% training data, and `r round((1-split)*100)`% test data.
+We split the data into **`r round(split*100)`%** training data, and **`r round((1-split)*100)`%** test data.
 
 ## Defining success
 
@@ -350,8 +350,8 @@ f1_all_rejected <- f1Score(renum(testset$label), rep(1, nrow(testset)))
 
 The F1 scores for the baseline methods are:
 
-- Predicting at random: `r round(f1_random, 3)`
-- Predicting all rejected: `r round(f1_all_rejected, 3)`
+- Predicting at random: **`r round(f1_random, 3)`**
+- Predicting all rejected: **`r round(f1_all_rejected, 3)`**
 
 # Training a model
 ## Learning curves
@@ -361,11 +361,12 @@ We firstly want to do a sanity check, we wish to check that as we increase the s
 ```{r learning_curves, echo=TRUE}
 set.seed(34)
 score_by_length <- data.frame()
-for(i in seq(100,2408,50)){
+split_cv <- 0.9
+total_train_rows <- nrow(trainset)*split_cv
+for(i in seq(100, total_train_rows, 50)){
     f1_train <- c()
     f1_cv <- c()
     for(k in 1:10){
-        split_cv <- 0.9
         trainset_cv <- random_split(trainset, split_cv)
         trainset_cv_subsample <- head(trainset_cv[[1]][order(rnorm(nrow(trainset_cv[[1]])))], i)
         nn_length <- neuralnet(
@@ -395,7 +396,7 @@ ggplot(plot_score, aes(x=length, y=value, col=variable)) +
     labs(x="Dataset size (rows)", y="Average neural network F1 score", col="Score type")
 ```
 
-From the plot we see that increasing the datasize generally improves the models performance on both training and test data, which is reassuring. After a certain number of rows of data the score appears to approach a maximum theoretical value. Naturally the model is limited to the information that our features provide.
+From the plot we see that increasing the data size generally improves the models performance on both training and test data, which is reassuring. After a certain number of rows of data the score appears to approach a maximum theoretical value. Naturally the model is limited to the information that our features provide.
 
 ## Neural network
 
@@ -507,7 +508,7 @@ Here we evaluate our neural network.
 best_nn_f1_score_test <- evaluate_nn(best_nn, testset)
 ```
 
-The F1 score of our best neural network is *`r round(best_nn_f1_score_test, 3)`*.
+The F1 score of our best neural network is **`r round(best_nn_f1_score_test, 3)`**.
 
 It is likely we can do better with our next model.
 
@@ -519,7 +520,7 @@ XGBoost is a decision tree learning algorithm in R. It is a popular choice in ma
 
 To train an XGBoost algorithm we need to specify a number of hyperparameters, such as how quickly should the algorithm learn (too fast and we may not converge, too slow and we might not optimise), how deep can the decision trees be (too shallow and they aren't very informative, too deep and we risk overfitting), and more.
 
-Exacrlt like a neural network, to determine these parameters we can do a grid search, training a new algorithm each time. This means we select a range of options and train a new algorithm for each one. Each time we put aside a little of the training data, and then use it to evaluate the model afterwards. Once we determine the best parameters, we train the full model.
+Exactly like a neural network, to determine these parameters we can do a grid search, training a new algorithm each time. This means we select a range of options and train a new algorithm for each one. Each time we put aside a little of the training data, and then use it to evaluate the model afterwards. Once we determine the best parameters, we train the full model.
 
 ```{r xgboost, echo=TRUE, message=FALSE}
 set.seed(25)
@@ -550,7 +551,7 @@ for(d in depth){
         cv <- xgb.cv(
             data = dtrain,
             nfold = 10,
-            nrounds = 500,
+            nrounds = 2000,
             feval = eval_metric,
             max_depth = d,
             eta = e,
@@ -597,7 +598,7 @@ xgmodel <- xgb.train(
 
 This plot shows the F1 score for a range of options. We can see which depth and ETA (training rate) give the best results, and how many training iterations it took to get there.
 
-For interest, our best depth was *`r best_vals$depth`*, our best ETA was *`r best_vals$eta`*, and the F1 score on the cross-validation data was *`r round(best_vals$test_f1, 3)`*.
+For interest, our best depth was **`r best_vals$depth`**, our best ETA was **`r best_vals$eta`**, and the F1 score on the cross-validation data was **`r round(best_vals$test_f1, 3)`**.
 
 ### Evaluation
 
@@ -613,7 +614,7 @@ train_f1_score <- f1Score(renum(trainset$label), train_predictions)
 test_f1_score <- f1Score(renum(testset$label), test_predictions)
 ```
 
-From our XGBoost model we obtain an F1 score on test data of *`r round(test_f1_score, 3)`*.
+From our XGBoost model we obtain an F1 score on test data of **`r round(test_f1_score, 3)`**.
 
 ### Feature importance
 
