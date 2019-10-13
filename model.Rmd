@@ -21,6 +21,7 @@ library(ModelMetrics)
 library(neuralnet)
 library(tm)
 library(xgboost)
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='figures/', echo=TRUE, warning=FALSE, message=FALSE)
 ```
 
 # Introduction
@@ -36,7 +37,7 @@ Through this study we hope to:
 
 # The data
 
-The data was sourced from the [planning applications search portal](https://publicaccess.southend.gov.uk/online-applications/search.do?action=monthlyList). [A Python library](https://github.com/thecasper2/southend-planning-scraper) was constructed in order to scrape applications that had been decided between September 2018 and October 2019. The data contains, among other information:
+The data was sourced from the [planning applications search portal](https://publicaccess.southend.gov.uk/online-applications/search.do?action=monthlyList) of Southend Borough Council website. [A Python library](https://github.com/thecasper2/southend-planning-scraper) was constructed in order to scrape applications that had been decided between September 2018 and October 2019. The data contains, among other information:
 
 - The decision of the application
 - Details about the nature of the application
@@ -94,7 +95,7 @@ ggplot(data[, c("label")], aes(x=as.factor(label))) +
 
 This is important because it makes it simpler for a machine-learnt algorithm to do well. If it simply predicts that every application is approved then it will have a fairly good success rate. However this doesn't bring us much information or practical use.
 
-If we define the target to be the sparse value (i.e. the less-frequent outcome, a rejection) we can use an evaluation metric called "F1 score"" to punish an algorithm for predicting all one value. This metric is explained in more detail in a later section
+If we define the target to be the sparse value (i.e. the less-frequent outcome, a rejection) we can use an evaluation metric called "F1 score" to punish an algorithm for predicting all one value. This metric is explained in more detail in a later section
 
 ### Case officer sex
 
@@ -114,6 +115,8 @@ data <- data[case_officers, on="Case.Officer"]
 
 ### Applicant sex
 
+This feature will take the applicant's title and determine if they are male or female. If there are a couple (e.g. Mr and Mrs) we will label it a couple. If it doesn't match any of these conditions, we label is as "other".
+
 ```{r applicant_sex, echo=TRUE}
 # Applicant sex
 male <- paste(c("Mr "), collapse="|")
@@ -122,10 +125,12 @@ couple <- paste(c("Mr & Mrs", "Mr And Mrs"), collapse="|")
 data[grepl(male, Applicant.Name), Applicant.Sex := "male"]
 data[grepl(female, Applicant.Name), Applicant.Sex := "female"]
 data[grepl(couple, Applicant.Name), Applicant.Sex := "couple"]
-data[is.na(Applicant.Sex), Applicant.Sex := "na"]
+data[is.na(Applicant.Sex), Applicant.Sex := "other"]
 ```
 
 ### Using an agent
+
+If the field "Agent.Name" is populated, then the applicant is using an agent for the application. In this case we set the feature to 1, otherwise we set it to 0.
 
 ```{r using_agent, echo=TRUE}
 # Using agent
@@ -133,6 +138,8 @@ data[, Using.Agent := ifelse(Agent.Name == "", 0, 1)]
 ```
 
 ### Application description
+
+The application description may be full of a lot of vital information. To be able to work with it cleanly we first need to remove punctuation, and "stop words". For example the word "the" doesn't bring us much value.
 
 ```{r clean_description, echo=TRUE}
 # Strip description punctuation and stopwords
@@ -142,10 +149,19 @@ data[, description := removeWords(tolower(description), stopwords("en"))]
 
 #### Word importance
 
-```{r description_words, echo=TRUE}
+We turn our attention to the importance of words in the application's approval or rejection status. To do this we firstly note every instance of every word and count how many times it appears in a rejection, and how many times in an acceptance. If it appears multiple times in a single application, we only count it once.
+
+```{r average_rejection}
 # Determine average rejection rate
 total_rejection <- nrow(data[label==1])
 total_acceptance <- nrow(data[label==0])
+```
+
+What we know currently is that approximately `r print(round(total_rejection/total_rejection+total_acceptance))`% of applications are rejected. Given each word's prevalance in accepted and rejected applications, we can see if a word contributes more or less to a rejection. For this we construct the "rejection index" metric, where a value greater than 0 means a word is more likely to lead to a rejection, and less than 0 for less likely.
+
+Given that this follows a binomial pattern (successes and failures), we can also perform a fisher's exact test on each word to see the significance (p value) in the difference between the word and the average rejection rate. We can then filter to words that contribute a significant difference. Note that a low p-value means high significance (see the [Wikipedia page for Fisher's exact test](https://en.wikipedia.org/wiki/Fisher%27s_exact_test) for more information).
+
+```{r description_words, echo=TRUE}
 
 # Make function to return word frequency data frame
 make_Tdm <- function(string_vector){
@@ -200,18 +216,27 @@ word_freq_plot
 
 #### Building the feature
 
+Using our most relevant important words, we can then build features from each one. For each word we can construct a single feature called "Is.That.Word" (where That.Word is replaced by the word), and set it to 1 if the description contains it, and 0 otherwise.
+
 ```{r features, echo=TRUE}
 # Description features
-data[, Is.Erect := ifelse(grepl("erect", tolower(description)), 1, 0)]
-data[, Is.Storey := ifelse(grepl("storey", tolower(description)), 1, 0)]
-data[, Is.Extension := ifelse(grepl("extension", tolower(description)), 1, 0)]
-data[, Is.Install := ifelse(grepl("install", tolower(description)), 1, 0)]
-data[, Is.Alter := ifelse(grepl("alter", tolower(description)), 1, 0)]
-data[, Is.Roof := ifelse(grepl("roof", tolower(description)), 1, 0)]
-data[, Is.Parking := ifelse(grepl("parking", tolower(description)), 1, 0)]
+#word_features <- c("erect", "storey", "extension", "install", "alter", "roof", "parking")
+word_features <- c("tree", "wall", "eaves", "vehicular", "cycle", "dwelling", "parking", "flats")
+
+# Build 1 feature for each word
+for(word in word_features){
+    word_col <- paste0("Is.", word)
+    # Ensure we look for complete words (not inside of another word)
+    word <- paste0("\\<", word, "\\>")
+    data[, (word_col) := ifelse(grepl(word, tolower(description)), 1, 0)]
+}
 ```
 
 # Preparing data for the model
+
+In order to train a model we need to preprocess our data. The main step for this is treating "categorical" data, i.e. data that isn't numerical, but instead takes on particular values. One example is "Application.Type". The application can be a number of "types" in written form, which a model will not be able to learn from.
+
+To deal with these we use a method called "one-hot encoding", where each type is a made into a new feature. That feature is then either said to be 0 or 1 for one application depending on if the application is that type. More information about one-hot encoding can be found [here](https://hackernoon.com/what-is-one-hot-encoding-why-and-when-do-you-have-to-use-it-e3c6186d008f).
 
 ```{r test_train, echo=TRUE}
 # Set seed
@@ -221,17 +246,14 @@ set.seed(123)
 reordered_data <- data[order(rnorm(nrow(data)))]
 
 # Determine feature data types
+all_cols <- colnames(data)
+binary_cols <- all_cols[grepl("Is.", all_cols)]
+
 numerical_cols <- c(
     "Case.Officer.Male",
     "Using.Agent",
     "label",
-    "Is.Erect",
-    "Is.Storey",
-    "Is.Extension",
-    "Is.Install",
-    "Is.Alter",
-    "Is.Roof",
-    "Is.Parking"
+    binary_cols
 )
 categorical_cols <- c(
     "Application.Type",
@@ -262,7 +284,11 @@ colnames(data_features) <- make.names(colnames(data_features), unique=TRUE)
 
 # Set label as factor
 data_features[, label := as.factor(label)]
+```
 
+After that we need to split the data into training and test data. This means we can train a model on training data, and evaluate how well that model performs on new test data that it hasn't seen before. This helps us prevent the model from fitting the training data really well, but not generalising to new data very well.
+
+```{r test_train_split}
 # Split into train and test
 random_split <- function(data, split){
     n <- nrow(data)
@@ -278,9 +304,23 @@ trainset <- split_data[[1]]
 testset <- split_data[[2]]
 ```
 
+We split the data into `r round(split*100)`% training data, and `r round((1-split)*100)`% test data.
+
 ## Defining success
 
-F1 accuracy
+In order to determine if a model is predicting well we need an evaluation metric. As mentioned above we wish to use F1 score. Briefly, this metric evaluates two things:
+
+- Precision: are the predicted rejections actual rejections?
+- Recall: how many actual rejections did we predict?
+
+This is useful because it forces our model to not only reduce the false positives (i.e. predicting rejection when actually it was accepted), but also attempt to find the rejections (rather than prudently predict all accepted).
+
+The F1 score ranges from:
+
+- 0: No correct predictions
+- 1: All predictions correct, and all rejections found
+
+More information about F1 score can be found [here](https://en.wikipedia.org/wiki/F1_score).
 
 ```{r evaluation_function, echo=TRUE}
 # Make a function to evaluate the neural net against some actual labels
@@ -295,12 +335,31 @@ evaluate_nn <- function(nn, data){
 }
 ```
 
+In order to determine if our F1 score is "good", we can compare it to a baseline prediction method. We look at the F1 scores of two simple methods:
+
+- Predicting at random (i.e. equal and random chance of approval and rejection)
+- Predicting all rejected
+
+For obvious reasons we would like to do better than either of these methods. Note that predicting all accepted would give an F1 score of 0.
+
+```{r baseline_scores, echo=TRUE}
+set.seed(123)
+f1_random <- f1Score(renum(testset$label), round(runif(nrow(testset))))
+f1_all_rejected <- f1Score(renum(testset$label), rep(1, nrow(testset)))
+```
+
+The F1 scores for the baseline methods are:
+
+- Predicting at random: `r round(f1_random, 3)`
+- Predicting all rejected: `r round(f1_all_rejected, 3)`
+
 # Training a model
 ## Learning curves
 
-Here we test that increasing the data size leads to an improvement of the algorithm against unseen test data
+Here we test that increasing the data size leads to an improvement of the algorithm against unseen test data.
 
 ```{r increasing_dataset, eval=FALSE, echo=TRUE}
+set.seed(34)
 score_by_length <- data.frame()
 for(i in seq(100,700,100)){
     f1_train <- c()
@@ -335,23 +394,28 @@ ggplot(plot_score, aes(x=length, y=value, col=variable)) + geom_line() + theme_b
 
 ## Neural network
 
-```{r train_neuralnet, eval=FALSE, echo=TRUE}
+Here we train a neural network.
+
+```{r train_neuralnet, echo=TRUE, message=FALSE}
+set.seed(65)
 # Set up some cross-validation variables
 cv_variables <- list(
-    n_hidden_layers = c(1,2,3),
-    hidden_layer_nodes = c(2,4,6,8),
-    cv_split = 0.8,
-    kfolds = 5
+    n_hidden_layers = c(1),
+    hidden_layer_nodes = seq(2, 3, 1),# seq(2, 8, 1),
+    kfolds = 10
 )
 
 # Perform CV
 best_f1 <- 0
+results_df <- data.frame()
 for(layers in cv_variables$n_hidden_layers){
     for(nodes in cv_variables$hidden_layer_nodes){
         current_f1 <- c()
+        best_fold_f1 <- 0
         for(k in 1:cv_variables$kfolds){
+            # cat("\r", k, "/", cv_variables$kfolds, " folds")
             # Split data into test and cv
-            split_data_cv <- random_split(trainset, cv_variables$cv_split)
+            split_data_cv <- random_split(trainset, (cv_variables$kfolds - 1)/cv_variables$kfolds)
             trainset_split <- split_data_cv[[1]]
             cvset_split <- split_data_cv[[2]]
             # Train NN
@@ -365,39 +429,75 @@ for(layers in cv_variables$n_hidden_layers){
               rep=2
             )
             # Evaluate NN
-            current_f1 <- c(current_f1, evaluate_nn(nn, cvset_split))
-            cat("\r", k, "/", cv_variables$kfolds, " fold")
+            nn_f1score <- evaluate_nn(nn, cvset_split)
+            if(nn_f1score > best_fold_f1){
+                best_nn_from_fold <- nn
+                best_fold_f1 <- nn_f1score
+            }
+            current_f1 <- c(current_f1, nn_f1score)
         }
-        f1 <- mean(current_f1)
-        if(f1 > best_f1){
-            best_f1 <- f1
-            best_nn <- nn
-            print("New best model: ")
+        avg_f1 <- mean(current_f1)
+        max_f1 <- max(current_f1)
+        min_f1 <- min(current_f1)
+        if(avg_f1 > best_f1){
+            best_f1 <- avg_f1
+            best_nn <- best_nn_from_fold
+            # cat("\n")
+            # print("New best model: ")
         }
-        # Print results
-        print(
-            paste0("F1: ", f1, ", layers:", layers, ", nodes:", nodes)
+        #
+        # Store results
+        current_results <- data.frame(
+            layers = layers,
+            nodes = nodes,
+            avg_f1 = avg_f1,
+            max_f1 = max_f1,
+            min_f1 = min_f1
         )
+        results_df <- rbind(results_df, current_results)
+        # Print results
+        # cat("\n")
+        # print(
+        #     paste0(
+        #         "Avg F1: ", round(avg_f1, 3),
+        #         " best f1:", round(max_f1,3),
+        #         ", layers:", layers,
+        #         ", nodes:", nodes
+        #     )
+        # )
     }
 }
 
+plot_results <- melt(results_df, id=c("nodes", "layers"))
+ggplot(plot_results, aes(x=nodes, y=value, col=variable)) +
+    geom_line() +
+    theme_bw() +
+    facet_wrap(~layers)
 ```
 
 ### Evaluation
 
-```{r evaluate_neuralnet, eval=FALSE, echo=TRUE}
+Here we evaluate our neural network.
+
+```{r evaluate_neuralnet, echo=TRUE}
 # Make prediction on test set
-set.seed(123)
-print(paste0("F1 score of random guesses on test set: ", f1Score(renum(testset$label), round(runif(nrow(testset))))))
-print(paste0("F1 score of predicting all rejected on test set: ", f1Score(renum(testset$label), rep(1, nrow(testset)))))
-print(paste0("F1 score of best NN on test set: ", evaluate_nn(best_nn, testset)))
+best_nn_f1_score_test <- evaluate_nn(best_nn, testset)
 ```
+
+The F1 score of our best neural network is `r round(best_nn_f1_score_test, 3)`.
 
 ## XGBoost
 
+XGBoost is a decision tree learning algorithm in R. It is a popular choice in many learning algorithms, and works well with very large data. More information about XGBoost in R can be found [here](https://xgboost.readthedocs.io/en/latest/R-package/index.html).
+
 ### Training
 
-```{r xgboost, eval=FALSE, echo=TRUE}
+To train an XGBoost algorithm we need to specify a number of hyperparameters, such as how quickly should the algorithm learn (too fast and we may not converge, too slow and we might not optimise), how deep can the decision trees be (too shallow and they aren't very informative, too deep and we risk overfitting), and more.
+
+To determine these parameters we can do a grid search, training a new algorithm each time. This means we select a range of options and train a new algorithm for each one. Each time we put aside a little of the training data, and then use it to evaluate the model afterwards. Once we determine the best parameters, we train the full model.
+
+```{r xgboost, echo=TRUE, message=FALSE}
+set.seed(25)
 # Make train data in XGBoost form
 dtrain <- xgb.DMatrix(data = sparse.model.matrix(label ~ .-1, data=trainset), label = renum(trainset$label))
 dtest <- xgb.DMatrix(data = sparse.model.matrix(label ~ .-1, data=testset), label = renum(testset$label))
@@ -415,14 +515,17 @@ eval_metric = xgb_eval_f1
 booster = "gbtree"
 
 # Gridsearch best params
-depth <- c(5, 6, 7, 8)
-eta <- c(0.05, 0.075, 0.1)
+#depth <- c(3, 4, 5, 6, 7, 8)
+#eta <- c(0.05, 0.075, 0.1)
+
+depth <- c(3, 4)
+eta <- c(0.05, 0.075)
 
 grid_result <- data.frame()
 for(d in depth){
-    print(paste0("Depth: ", d))
+    #print(paste0("Depth: ", d))
     for(e in eta){
-        print(paste0("ETA: ", e))
+        #print(paste0("ETA: ", e))
         cv <- xgb.cv(
             data = dtrain,
             nfold = 10,
@@ -432,7 +535,9 @@ for(d in depth){
             eta = e,
             subsample = 0.9,
             maximize = TRUE,
-            print_every_n = 50
+            print_every_n = 50,
+            early_stopping_rounds = 100,
+            verbose = 0
         )
         eval <- cv$evaluation_log
         best_iter <- eval[which.max(eval$test_f1_mean),]
@@ -449,7 +554,8 @@ for(d in depth){
 ggplot(grid_result, aes(x=depth, col=as.factor(eta), y=test_f1)) +
     geom_line() +
     geom_point(aes(size=best_iter)) +
-    theme_bw()
+    theme_bw() +
+    labs(x="Depth", y="F1 Score", col="ETA (learning rate)", size="Best iteration")
 
 best_vals <- grid_result[which.max(grid_result$test_f1),]
 
@@ -457,7 +563,7 @@ xgmodel <- xgb.train(
     data =  dtrain,
     nrounds = best_vals$best_iter,
     #nfold = 10,
-    verbose = 2,
+    verbose = 0,
     feval = eval_metric,
     objective = objective,
     max_depth = best_vals$depth,
@@ -473,9 +579,13 @@ xgmodel <- xgb.train(
 )
 ```
 
+This plot shows the F1 score for a range of options. We can see which depth and ETA (training rate) give the best results, and how many training iterations it took to get there.
+
+For interest, our best depth was `r best_vals$depth`, our best ETA was `r best_vals$eta`, and the F1 score on the cross-validation data was `r round(best_vals$test_f1, 3)`
+
 ### Evaluation
 
-```{r evaluate_xgboost, eval=FALSE, echo=TRUE}
+```{r evaluate_xgboost, echo=TRUE, message=TRUE}
 train_predictions <- predict(xgmodel, dtrain)
 threshold_f1 <- function(threshold){
     return(f1Score(renum(trainset$label), ifelse(train_predictions > threshold, 1, 0)))
@@ -483,8 +593,20 @@ threshold_f1 <- function(threshold){
 optimum_threshold <- optimize(threshold_f1, interval=c(0,1), maximum = TRUE)
 train_predictions <- ifelse(train_predictions > optimum_threshold$maximum, 1, 0)
 test_predictions <- ifelse(predict(xgmodel, dtest) > optimum_threshold$maximum, 1, 0)
-print(paste0("Train F1: ", f1Score(renum(trainset$label), train_predictions)))
-print(paste0("Test F1: ", f1Score(renum(testset$label), test_predictions)))
+train_f1_score <- f1Score(renum(trainset$label), train_predictions)
+test_f1_score <- f1Score(renum(testset$label), test_predictions)
+```
+
+From our XGBoost model we obtain an F1 score on test data of `r round(test_f1_score, 3)`.
+
+### Feature importance
+
+From our trained model we can see which features are most important for determining the application decision. We focus on the gain metric for each feature (the improvement in accuracy brought by a feature to the branches it is on). A high gain score implies that the feature adds a lot of information to determining the outcome.
+
+More information about the gain metric can be found under the Measure feature important section of the [XGBoost documentation](https://xgboost.readthedocs.io/en/latest/R-package/discoverYourData.html).
+
+```{r, echo=TRUE}
+xgb.importance(model=xgmodel)
 ```
 
 
