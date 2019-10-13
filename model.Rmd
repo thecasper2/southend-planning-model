@@ -356,23 +356,24 @@ The F1 scores for the baseline methods are:
 # Training a model
 ## Learning curves
 
-Here we test that increasing the data size leads to an improvement of the algorithm against unseen test data.
+We firstly want to do a sanity check, we wish to check that as we increase the size of our dataset, our F1 score on out-of-sample data (data we didn't use to train the model) improves.
 
 ```{r increasing_dataset, eval=FALSE, echo=TRUE}
 set.seed(34)
 score_by_length <- data.frame()
-for(i in seq(100,700,100)){
+for(i in seq(100,2408,50)){
     f1_train <- c()
     f1_cv <- c()
     for(k in 1:10){
         split_cv <- 0.9
         trainset_cv <- random_split(trainset, split_cv)
+        trainset_cv_subsample <- head(trainset_cv[[1]][order(rnorm(nrow(trainset_cv[[1]])))], i)
         nn_length <- neuralnet(
             label ~ .,
-            data=head(trainset_cv[[1]][order(rnorm(nrow(trainset_cv[[1]])))], i),
-            hidden=c(2,4),
+            data=trainset_cv_subsample,
+            hidden=c(1,3),
             linear.output=FALSE,
-            threshold=0.1,
+            threshold=0.5,
             stepmax = 500000,
             #learningrate.limit = c(0.1, 1),
             rep=5
@@ -384,24 +385,38 @@ for(i in seq(100,700,100)){
     f1_train <- mean(f1_train)
     f1_cv <- mean(f1_cv)
     score_by_length <- rbind(
-        score_by_length, data.frame(length=i, score_train=f1_train, score_test=f1_cv)
+        score_by_length, data.frame(length=i, train=f1_train, test=f1_cv)
     )
     cat(i, " rows")
 }
 plot_score <- melt(score_by_length, id="length")
-ggplot(plot_score, aes(x=length, y=value, col=variable)) + geom_line() + theme_bw()
+ggplot(plot_score, aes(x=length, y=value, col=variable)) +
+    geom_line() +
+    theme_bw() +
+    labs(x="Dataset size (rows)", y="Average neural network F1 score", col="Score type")
 ```
+
+From the plot we see that increasing the datasize generally improves the models performance on both training and test data, which is reassuring. After a certain number of rows of data the score appears to approach a maximum theoretical value. Naturally the model is limited to the information that our features provide.
 
 ## Neural network
 
-Here we train a neural network.
+An artificial neural network (ANN) is a machine learning algorithm that, very loosely speaking, is based upon the the method of learning seen in the brains of animals. The mathematics behind an ANN are not particularly complicated, and practically it is not complex to train one. We will try to do this with our data.
+
+More information on ANNs can be found [here](https://en.wikipedia.org/wiki/Artificial_neural_network).
+
+### Training
+
+To train an neural network we need to specify a number of hyperparameters, such as how quickly should the algorithm learn (too fast and we may not converge, too slow and we might not optimise), how many hidden layers and nodes we require (please see the link above for more information), and more.
+
+To determine these parameters we can do a grid search, training a new algorithm each time. This means we select a range of options and train a new algorithm for each one. Each time we put aside a little of the training data, and then use it to evaluate the model afterwards. Once we determine the best parameters, we train the full model.
 
 ```{r train_neuralnet, echo=TRUE, message=FALSE}
 set.seed(65)
 # Set up some cross-validation variables
 cv_variables <- list(
     n_hidden_layers = c(1),
-    hidden_layer_nodes = seq(2, 3, 1),# seq(2, 8, 1),
+    hidden_layer_nodes = seq(2, 6, 1),
+    learnrate = c(0.25, 0.5, 1, 2),
     kfolds = 10
 )
 
@@ -410,70 +425,79 @@ best_f1 <- 0
 results_df <- data.frame()
 for(layers in cv_variables$n_hidden_layers){
     for(nodes in cv_variables$hidden_layer_nodes){
-        current_f1 <- c()
-        best_fold_f1 <- 0
-        for(k in 1:cv_variables$kfolds){
-            # cat("\r", k, "/", cv_variables$kfolds, " folds")
-            # Split data into test and cv
-            split_data_cv <- random_split(trainset, (cv_variables$kfolds - 1)/cv_variables$kfolds)
-            trainset_split <- split_data_cv[[1]]
-            cvset_split <- split_data_cv[[2]]
-            # Train NN
-            nn <- neuralnet(
-              label ~ .,
-              data=trainset_split,
-              hidden=rep(nodes, layers),
-              linear.output=FALSE,
-              threshold=0.2,
-              stepmax = 500000,
-              rep=2
-            )
-            # Evaluate NN
-            nn_f1score <- evaluate_nn(nn, cvset_split)
-            if(nn_f1score > best_fold_f1){
-                best_nn_from_fold <- nn
-                best_fold_f1 <- nn_f1score
+        for(learnrate in cv_variables$learnrate){
+            current_f1 <- c()
+            best_fold_f1 <- 0
+            for(k in 1:cv_variables$kfolds){
+                cat("\r", k, "/", cv_variables$kfolds, " folds")
+                # Split data into test and cv
+                split_data_cv <- random_split(
+                    trainset,
+                    (cv_variables$kfolds - 1)/cv_variables$kfolds
+                )
+                trainset_split <- split_data_cv[[1]]
+                cvset_split <- split_data_cv[[2]]
+                # Train NN
+                nn <- neuralnet(
+                  label ~ .,
+                  data=trainset_split,
+                  hidden=rep(nodes, layers),
+                  linear.output=FALSE,
+                  threshold=learnrate,
+                  stepmax = 500000,
+                  rep=2
+                )
+                # Evaluate NN
+                nn_f1score <- evaluate_nn(nn, cvset_split)
+                if(nn_f1score > best_fold_f1){
+                    best_nn_from_fold <- nn
+                    best_fold_f1 <- nn_f1score
+                }
+                current_f1 <- c(current_f1, nn_f1score)
             }
-            current_f1 <- c(current_f1, nn_f1score)
+            avg_f1 <- mean(current_f1)
+            max_f1 <- max(current_f1)
+            min_f1 <- min(current_f1)
+            if(avg_f1 > best_f1){
+                best_f1 <- avg_f1
+                best_nn <- best_nn_from_fold
+                cat("\n")
+                print("New best model: ")
+            }
+            # Store results
+            current_results <- data.frame(
+                layers = layers,
+                nodes = nodes,
+                learnrate = learnrate,
+                avg_f1 = avg_f1,
+                max_f1 = max_f1,
+                min_f1 = min_f1
+            )
+            results_df <- rbind(results_df, current_results)
+            # Print results
+            cat("\n")
+            print(
+                paste0(
+                    "Avg F1: ", round(avg_f1, 3),
+                    " best f1: ", round(max_f1,3),
+                    ", layers: ", layers,
+                    ", nodes: ", nodes,
+                    ", learnrate: ", learnrate
+                )
+            )
         }
-        avg_f1 <- mean(current_f1)
-        max_f1 <- max(current_f1)
-        min_f1 <- min(current_f1)
-        if(avg_f1 > best_f1){
-            best_f1 <- avg_f1
-            best_nn <- best_nn_from_fold
-            # cat("\n")
-            # print("New best model: ")
-        }
-        #
-        # Store results
-        current_results <- data.frame(
-            layers = layers,
-            nodes = nodes,
-            avg_f1 = avg_f1,
-            max_f1 = max_f1,
-            min_f1 = min_f1
-        )
-        results_df <- rbind(results_df, current_results)
-        # Print results
-        # cat("\n")
-        # print(
-        #     paste0(
-        #         "Avg F1: ", round(avg_f1, 3),
-        #         " best f1:", round(max_f1,3),
-        #         ", layers:", layers,
-        #         ", nodes:", nodes
-        #     )
-        # )
     }
 }
 
-plot_results <- melt(results_df, id=c("nodes", "layers"))
+plot_results <- melt(results_df, id=c("nodes", "layers", "learnrate"))
 ggplot(plot_results, aes(x=nodes, y=value, col=variable)) +
     geom_line() +
     theme_bw() +
-    facet_wrap(~layers)
+    facet_wrap(~learnrate) +
+    labs(x="Nodes", y="F1 score", col="Score type")
 ```
+
+The graph above shows our F1 scores for different settings. Our x-axis is the number of nodes, and each plot is a different learning rate. We will only use one hidden layer.
 
 ### Evaluation
 
@@ -486,6 +510,8 @@ best_nn_f1_score_test <- evaluate_nn(best_nn, testset)
 
 The F1 score of our best neural network is `r round(best_nn_f1_score_test, 3)`.
 
+It is likely we can do better with our next model.
+
 ## XGBoost
 
 XGBoost is a decision tree learning algorithm in R. It is a popular choice in many learning algorithms, and works well with very large data. More information about XGBoost in R can be found [here](https://xgboost.readthedocs.io/en/latest/R-package/index.html).
@@ -494,7 +520,7 @@ XGBoost is a decision tree learning algorithm in R. It is a popular choice in ma
 
 To train an XGBoost algorithm we need to specify a number of hyperparameters, such as how quickly should the algorithm learn (too fast and we may not converge, too slow and we might not optimise), how deep can the decision trees be (too shallow and they aren't very informative, too deep and we risk overfitting), and more.
 
-To determine these parameters we can do a grid search, training a new algorithm each time. This means we select a range of options and train a new algorithm for each one. Each time we put aside a little of the training data, and then use it to evaluate the model afterwards. Once we determine the best parameters, we train the full model.
+Exacrlt like a neural network, to determine these parameters we can do a grid search, training a new algorithm each time. This means we select a range of options and train a new algorithm for each one. Each time we put aside a little of the training data, and then use it to evaluate the model afterwards. Once we determine the best parameters, we train the full model.
 
 ```{r xgboost, echo=TRUE, message=FALSE}
 set.seed(25)
@@ -510,16 +536,12 @@ xgb_eval_f1 <- function (yhat, dtrain) {
 
 # Define parameters
 objective='binary:logistic'
-#metrics = "logloss"
 eval_metric = xgb_eval_f1
 booster = "gbtree"
 
 # Gridsearch best params
-#depth <- c(3, 4, 5, 6, 7, 8)
-#eta <- c(0.05, 0.075, 0.1)
-
-depth <- c(3, 4)
-eta <- c(0.05, 0.075)
+depth <- c(3, 4, 5, 6, 7, 8)
+eta <- c(0.05, 0.075, 0.1)
 
 grid_result <- data.frame()
 for(d in depth){
@@ -562,18 +584,13 @@ best_vals <- grid_result[which.max(grid_result$test_f1),]
 xgmodel <- xgb.train(
     data =  dtrain,
     nrounds = best_vals$best_iter,
-    #nfold = 10,
     verbose = 0,
     feval = eval_metric,
     objective = objective,
     max_depth = best_vals$depth,
-    eta = best_vals$eta,                               
-    #subsample = 0.9,
-    #"colsample_bytree" = 0.9,
-    print_every_n = 10, 
-    #"min_child_weight" = 1,
+    eta = best_vals$eta,
+    print_every_n = 10,
     booster = booster,
-    #early_stopping_rounds = 100,
     watchlist = list(train = dtrain),
     maximize = TRUE
 )
@@ -612,6 +629,9 @@ xgb.importance(model=xgmodel)
 
 # Appendix
 ## Plots
+### Case officer sex
+
+For interest we can plot the application approval rate by the sex of the case worker. It must be reiterated that, as this is an observational study (i.e. it is not a controlled experiment, but just observation of data), no causal effect can be inferred. This means we cannot say that the sex causes the approval rate (or vice versa, although it is unlikely that the approval rate causes someone to have a certain sex).
 
 ```{r case_officer_sex_plots, echo=TRUE}
 data_plot <- data
@@ -623,19 +643,3 @@ ggplot(data_plot, aes(x=Case.Officer.Sex, y=percent)) +
     theme_bw() +
     labs(x="Case officer sex", y="Applications approved (%)", title="Application approval by sex")
 ```
-
-```{r ggally, eval=FALSE, echo=TRUE}
-data_gally <- data[,c("Application.Type", "Case.Officer", "Ward", "Case.Officer.Male", "Applicant.Male", "Using.Agent", "label")]
-data_gally[, Case.Officer.Male := Case.Officer.Male > 0.5]
-data_gally[, Applicant.Male := Applicant.Male > 0.5]
-data_gally[, Using.Agent := Using.Agent > 0.5]
-data_gally[, label := label > 0.5]
-gally_plot <- melt(data_gally, id="label")
-gally_plot[, variable := as.factor(variable)]
-gally <- ggplot(gally_plot, aes(x=value, fill=label)) +
-    geom_histogram(stat="count") +
-    theme_bw() +
-    facet_grid(~variable, scales="free_x") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
