@@ -1,74 +1,258 @@
 ---
-title: "Southend Planning Permission Model"
-output: html_notebook
+title: "Southend planning applications - A study"
+author: "Alex Dolphin"
+date: 13/10/2019
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
 ---
 
-```{r libraries}
+```{r libraries, echo=TRUE, message=FALSE}
+library(caret)
 library(data.table)
-library(magrittr)
 library(ggplot2)
 library(gender)
-library(caret)
+library(magrittr)
+library(Matrix)
+library(ModelMetrics)
 library(neuralnet)
+library(tm)
+library(xgboost)
 ```
 
-```{r read_data}
-data <- read.csv("details.csv") %>% as.data.table()
-data[, X:=NULL]
-data <- data[Decision != "Withdrawn"]
+# Introduction
+
+In order to commence some sort of architectural project within Southend borough, an approved planning application is required. Examples of projects can be seen on the [Southend Borough Council Planning Application Website](https://www.southend.gov.uk/info/200158/common_projects).
+
+This study aims to look at previously decided applications and their respective details, and see if we can learn what is required for a successful application. In fact we will look at it from a reverse perspective, i.e. what features of an application may lead to it being rejected.
+
+Through this study we hope to:
+
+- Learn which features of an application are relevant for rejection
+- Build a model that can predict whether or not an application will be rejected
+
+# The data
+
+The data was sourced from the [planning applications search portal](https://publicaccess.southend.gov.uk/online-applications/search.do?action=monthlyList). [A Python library](https://github.com/thecasper2/southend-planning-scraper) was constructed in order to scrape applications that had been decided between September 2018 and October 2019. The data contains, among other information:
+
+- The decision of the application
+- Details about the nature of the application
+- A text description of the application
+
+```{r read_data, echo=TRUE}
+data_read <- data.table()
+for(filename in list.files(path="data", pattern="details")){
+    temp_file <- read.csv(paste0("data/", filename)) %>% as.data.table()
+    data_read <- rbind(data_read, temp_file)
+}
+data_read[, X:=NULL]
+data_read <- data_read[Decision != "Withdrawn"]
 ```
 
-```{r features}
-# Temp reread
-data <- read.csv("details.csv") %>% as.data.table()
-data[, X:=NULL]
-data <- data[Decision != "Withdrawn"]
+## Building features
 
+In order to learn what is important for the rejection of an application, we need to build features. This means constructing meaningful data from the raw data we currently have. This should become clearer in the subsections
+
+```{r transfer_df, echo=TRUE}
+# Transfer to new variable
+data <- data_read
+```
+
+### Defining the target
+
+Firstly we need to determine what our target is, i.e. what we are concretely trying to predict. This may seem trivial, as we have already stated that we are interested in predicting acceptance or rejection. Practically the decision actually takes a number of forms, e.g. "Refuse Non Material Amendment", or "Grant consent to carry out work to trees". 
+
+```{r target, echo=TRUE}
 # Label
 success <- paste(c("Allow", "Non Conditional", "Grant", "No Objection"), collapse="|")
 failure <- paste(c("Refusal", "Refuse"), collapse="|")
-data[grepl(success, Decision), label:= "approved"]
-data[grepl(failure, Decision), label:= "rejected"]
+data[grepl(success, Decision), label:= 0]
+data[grepl(failure, Decision), label:= 1]
+data <- data[label %in% c(0, 1)]
+```
 
-# Case officer gender
+To make it simple we will take the decision text and assign the following labels:
+
+- 0 if the label contains `r print(success)`
+- 1 if the label contains `r print(failure)`
+
+Where 0 denotes a successful application, and 1 denotes a rejection. This may seem counter intuative, but we see in the next section why this is important.
+
+#### Target skew
+
+One challenge that occurs when building a prediction is target skew, i.e. our target isn't evenly distributed across applications. Here we see in our data that most applications have target 0, i.e. most applications are successful:
+
+```{r label_skew, echo=TRUE}
+ggplot(data[, c("label")], aes(x=as.factor(label))) +
+    geom_histogram(stat="count") +
+    theme_bw() +
+    labs(x="Label", y="Count", title="Distribution of target labels", subtitle="Check for skewness")
+```
+
+This is important because it makes it simpler for a machine-learnt algorithm to do well. If it simply predicts that every application is approved then it will have a fairly good success rate. However this doesn't bring us much information or practical use.
+
+If we define the target to be the sparse value (i.e. the less-frequent outcome, a rejection) we can use an evaluation metric called "F1 score"" to punish an algorithm for predicting all one value. This metric is explained in more detail in a later section
+
+### Case officer sex
+
+This feature will take the case officer name and determine if they are male or female (with some probability).
+
+```{r case_officer_sex, echo=TRUE}
+# Case officer sex
 case_officers <- data.table(Case.Officer=levels(data$Case.Officer))
-case_officers[, first_name := gsub(" .*$","",as.character(Case.Officer))]
-case_officers[, Case.Officer.Male := gender(first_name)$proportion_male]
-case_officers[, first_name := NULL]
+case_officers[, name := gsub(" .*$","",as.character(Case.Officer))]
+case_officer_sexes <- as.data.table(gender(unique(case_officers$name)))
+case_officers <- case_officers[case_officer_sexes, on="name"]
+case_officers[, Case.Officer.Male := proportion_male]
+case_officers <- case_officers[, c("Case.Officer", "Case.Officer.Male")]
+case_officers[, Case.Officer := as.factor(Case.Officer)]
 data <- data[case_officers, on="Case.Officer"]
+```
 
-# Applicant gender
+### Applicant sex
+
+```{r applicant_sex, echo=TRUE}
+# Applicant sex
 male <- paste(c("Mr "), collapse="|")
 female <- paste(c("Mrs ", "Miss", "Ms "), collapse="|")
 couple <- paste(c("Mr & Mrs", "Mr And Mrs"), collapse="|")
-data[grepl(male, Applicant.Name), Applicant.Male := 1]
-data[grepl(female, Applicant.Name), Applicant.Male := 0]
-data[grepl(couple, Applicant.Name), Applicant.Male := NA]
+data[grepl(male, Applicant.Name), Applicant.Sex := "male"]
+data[grepl(female, Applicant.Name), Applicant.Sex := "female"]
+data[grepl(couple, Applicant.Name), Applicant.Sex := "couple"]
+data[is.na(Applicant.Sex), Applicant.Sex := "na"]
+```
 
+### Using an agent
+
+```{r using_agent, echo=TRUE}
 # Using agent
 data[, Using.Agent := ifelse(Agent.Name == "", 0, 1)]
 ```
 
-```{r test_train}
+### Application description
+
+```{r clean_description, echo=TRUE}
+# Strip description punctuation and stopwords
+data[, description := gsub('[[:punct:] ]+',' ', description)]
+data[, description := removeWords(tolower(description), stopwords("en"))]
+```
+
+#### Word importance
+
+```{r description_words, echo=TRUE}
+# Determine average rejection rate
+total_rejection <- nrow(data[label==1])
+total_acceptance <- nrow(data[label==0])
+
+# Make function to return word frequency data frame
+make_Tdm <- function(string_vector){
+    myTdm <- as.matrix(TermDocumentMatrix(Corpus(VectorSource(string_vector))))
+    df <- data.frame(
+        ST = rownames(myTdm), 
+        Freq = rowSums(myTdm), 
+        row.names = NULL
+    )
+    return(df[order(-df$Freq),] %>% as.data.table())
+}
+
+# Create reject and approve word frequencies
+reject_word_frequency <- make_Tdm(data[label == 1]$description)
+colnames(reject_word_frequency) <- c("ST", "reject_freq")
+approve_word_frequency <- make_Tdm(data[label == 0]$description)
+colnames(approve_word_frequency) <- c("ST", "accept_freq")
+#word_frequency <- total_word_frequency[reject_word_frequency, on="ST"][approve_word_frequency, on="ST"]
+word_frequency <- merge(approve_word_frequency, reject_word_frequency, on="ST", all = TRUE)
+word_frequency[is.na(accept_freq), accept_freq := 0]
+word_frequency[is.na(reject_freq), reject_freq := 0]
+word_frequency[, total_freq := accept_freq + reject_freq]
+
+# Get overll rejection ratio
+word_frequency[, total_rejection := total_rejection]
+word_frequency[, total_acceptance := total_acceptance]
+
+# Compare to average rejection rate
+word_frequency[, average_rejection_ratio := total_rejection/(total_rejection + total_acceptance)]
+word_frequency[, reject_ratio := reject_freq/(reject_freq + accept_freq)]
+word_frequency[, rejection_index := (reject_ratio/average_rejection_ratio)-1]
+
+get_fisher_p_val <- function(a, b, c, d){
+    return(fisher.test(rbind(c(a, b), c(c, d)), alternative = "two.sided", workspace = 200000)$p.value)
+}
+
+# Get significance of difference
+word_frequency[,
+    p_value := get_fisher_p_val(reject_freq, accept_freq, total_rejection, total_acceptance),
+    by = seq_len(nrow(word_frequency))
+]
+
+# Plot rejection indicies
+plot_word_frequency <- word_frequency[p_value < 0.0005 & total_freq > 100][order(-rejection_index)][,ST:=factor(ST, levels=ST)]
+word_freq_plot <- ggplot(plot_word_frequency, aes(x=ST, y=rejection_index, alpha=-p_value, fill=total_freq)) +
+    geom_bar(stat="identity") +
+    coord_flip() +
+    theme_bw() +
+    scale_fill_gradient(low="blue", high="red")
+word_freq_plot
+```
+
+#### Building the feature
+
+```{r features, echo=TRUE}
+# Description features
+data[, Is.Erect := ifelse(grepl("erect", tolower(description)), 1, 0)]
+data[, Is.Storey := ifelse(grepl("storey", tolower(description)), 1, 0)]
+data[, Is.Extension := ifelse(grepl("extension", tolower(description)), 1, 0)]
+data[, Is.Install := ifelse(grepl("install", tolower(description)), 1, 0)]
+data[, Is.Alter := ifelse(grepl("alter", tolower(description)), 1, 0)]
+data[, Is.Roof := ifelse(grepl("roof", tolower(description)), 1, 0)]
+data[, Is.Parking := ifelse(grepl("parking", tolower(description)), 1, 0)]
+```
+
+# Preparing data for the model
+
+```{r test_train, echo=TRUE}
 # Set seed
 set.seed(123)
 
 # Reorder
 reordered_data <- data[order(rnorm(nrow(data)))]
 
-# Extract features only
-data_features <- reordered_data[,c("Application.Type", "Case.Officer", "Ward", "Case.Officer.Male", "Applicant.Male", "Using.Agent", "label")]
+# Determine feature data types
+numerical_cols <- c(
+    "Case.Officer.Male",
+    "Using.Agent",
+    "label",
+    "Is.Erect",
+    "Is.Storey",
+    "Is.Extension",
+    "Is.Install",
+    "Is.Alter",
+    "Is.Roof",
+    "Is.Parking"
+)
+categorical_cols <- c(
+    "Application.Type",
+    "Case.Officer",
+    "Ward",
+    "Applicant.Sex"
+)
+reordered_data <- reordered_data[!is.na(Ward)]
+
+# Build feature dataset, starting with numerical data
+numerical_features <- reordered_data[, numerical_cols, with=FALSE]
 
 # One-hot encode categorical variables
-data_features <- cbind(
-    data_features,
-    predict(dummyVars(~Application.Type, data=data_features), newdata=data_features),
-    predict(dummyVars(~Case.Officer, data=data_features), newdata=data_features),
-    predict(dummyVars(~Ward, data=data_features), newdata=data_features)
-)
-data_features[, Application.Type:=NULL]
-data_features[, Case.Officer:=NULL]
-data_features[, Ward:=NULL]
+categorical_features <- data.table()
+for(column in categorical_cols){
+    one_hot <- reordered_data[[column]] %>% as.factor() %>% class2ind()
+    categorical_features <- cbind(categorical_features, one_hot)
+}
+
+# And combine
+data_features <- cbind(categorical_features, numerical_features)
 
 # Remove any remaining NA
 data_features <- na.omit(data_features)
@@ -80,39 +264,237 @@ colnames(data_features) <- make.names(colnames(data_features), unique=TRUE)
 data_features[, label := as.factor(label)]
 
 # Split into train and test
-split = 0.75
-trainset <- head(data_features, nrow(data_features)*split)
-testset <- tail(data_features, nrow(data_features)*(1-split))
+random_split <- function(data, split){
+    n <- nrow(data)
+    chosen_indices <- head(seq(1, n)[order(rnorm(n))], split*n)
+    return(list(
+        data[chosen_indices],
+        data[-chosen_indices]
+    ))
+}
+split = 0.9
+split_data <- random_split(data_features, split)
+trainset <- split_data[[1]]
+testset <- split_data[[2]]
 ```
 
-```{r train_neuralnet}
-nn <- neuralnet(
-  label ~ .,
-  data=trainset,
-  hidden=c(30, 30, 30, 30, 30),
-  linear.output=FALSE,
-  threshold=0.001
+## Defining success
+
+F1 accuracy
+
+```{r evaluation_function, echo=TRUE}
+# Make a function to evaluate the neural net against some actual labels
+renum <- function(vector){
+    return(as.numeric(as.character(vector)))
+}
+
+evaluate_nn <- function(nn, data){
+    predict <- compute(nn, data)
+    predict_labels <- ifelse(predict$net.result[, 1] > predict$net.result[, 2], 0, 1)
+    return(f1Score(renum(data$label), predict_labels))
+}
+```
+
+# Training a model
+## Learning curves
+
+Here we test that increasing the data size leads to an improvement of the algorithm against unseen test data
+
+```{r increasing_dataset, eval=FALSE, echo=TRUE}
+score_by_length <- data.frame()
+for(i in seq(100,700,100)){
+    f1_train <- c()
+    f1_cv <- c()
+    for(k in 1:10){
+        split_cv <- 0.9
+        trainset_cv <- random_split(trainset, split_cv)
+        nn_length <- neuralnet(
+            label ~ .,
+            data=head(trainset_cv[[1]][order(rnorm(nrow(trainset_cv[[1]])))], i),
+            hidden=c(2,4),
+            linear.output=FALSE,
+            threshold=0.1,
+            stepmax = 500000,
+            #learningrate.limit = c(0.1, 1),
+            rep=5
+        )
+        f1_train <- c(f1_train, evaluate_nn(nn_length, trainset_cv[[1]]))
+        f1_cv <- c(f1_cv, evaluate_nn(nn_length, trainset_cv[[2]]))
+        cat("\r", k, " fold")
+    }
+    f1_train <- mean(f1_train)
+    f1_cv <- mean(f1_cv)
+    score_by_length <- rbind(
+        score_by_length, data.frame(length=i, score_train=f1_train, score_test=f1_cv)
+    )
+    cat(i, " rows")
+}
+plot_score <- melt(score_by_length, id="length")
+ggplot(plot_score, aes(x=length, y=value, col=variable)) + geom_line() + theme_bw()
+```
+
+## Neural network
+
+```{r train_neuralnet, eval=FALSE, echo=TRUE}
+# Set up some cross-validation variables
+cv_variables <- list(
+    n_hidden_layers = c(1,2,3),
+    hidden_layer_nodes = c(2,4,6,8),
+    cv_split = 0.8,
+    kfolds = 5
+)
+
+# Perform CV
+best_f1 <- 0
+for(layers in cv_variables$n_hidden_layers){
+    for(nodes in cv_variables$hidden_layer_nodes){
+        current_f1 <- c()
+        for(k in 1:cv_variables$kfolds){
+            # Split data into test and cv
+            split_data_cv <- random_split(trainset, cv_variables$cv_split)
+            trainset_split <- split_data_cv[[1]]
+            cvset_split <- split_data_cv[[2]]
+            # Train NN
+            nn <- neuralnet(
+              label ~ .,
+              data=trainset_split,
+              hidden=rep(nodes, layers),
+              linear.output=FALSE,
+              threshold=0.2,
+              stepmax = 500000,
+              rep=2
+            )
+            # Evaluate NN
+            current_f1 <- c(current_f1, evaluate_nn(nn, cvset_split))
+            cat("\r", k, "/", cv_variables$kfolds, " fold")
+        }
+        f1 <- mean(current_f1)
+        if(f1 > best_f1){
+            best_f1 <- f1
+            best_nn <- nn
+            print("New best model: ")
+        }
+        # Print results
+        print(
+            paste0("F1: ", f1, ", layers:", layers, ", nodes:", nodes)
+        )
+    }
+}
+
+```
+
+### Evaluation
+
+```{r evaluate_neuralnet, eval=FALSE, echo=TRUE}
+# Make prediction on test set
+set.seed(123)
+print(paste0("F1 score of random guesses on test set: ", f1Score(renum(testset$label), round(runif(nrow(testset))))))
+print(paste0("F1 score of predicting all rejected on test set: ", f1Score(renum(testset$label), rep(1, nrow(testset)))))
+print(paste0("F1 score of best NN on test set: ", evaluate_nn(best_nn, testset)))
+```
+
+## XGBoost
+
+### Training
+
+```{r xgboost, eval=FALSE, echo=TRUE}
+# Make train data in XGBoost form
+dtrain <- xgb.DMatrix(data = sparse.model.matrix(label ~ .-1, data=trainset), label = renum(trainset$label))
+dtest <- xgb.DMatrix(data = sparse.model.matrix(label ~ .-1, data=testset), label = renum(testset$label))
+
+# Define our F1 metric
+xgb_eval_f1 <- function (yhat, dtrain) {
+  y = getinfo(dtrain, "label")
+  return (list(metric = "f1", value = f1Score(y, yhat, cutoff=0.2)))
+}
+
+# Define parameters
+objective='binary:logistic'
+#metrics = "logloss"
+eval_metric = xgb_eval_f1
+booster = "gbtree"
+
+# Gridsearch best params
+depth <- c(5, 6, 7, 8)
+eta <- c(0.05, 0.075, 0.1)
+
+grid_result <- data.frame()
+for(d in depth){
+    print(paste0("Depth: ", d))
+    for(e in eta){
+        print(paste0("ETA: ", e))
+        cv <- xgb.cv(
+            data = dtrain,
+            nfold = 10,
+            nrounds = 500,
+            feval = eval_metric,
+            max_depth = d,
+            eta = e,
+            subsample = 0.9,
+            maximize = TRUE,
+            print_every_n = 50
+        )
+        eval <- cv$evaluation_log
+        best_iter <- eval[which.max(eval$test_f1_mean),]
+        grid_result <- rbind(grid_result, data.frame(
+                best_iter = best_iter$iter,
+                test_f1 = best_iter$test_f1_mean,
+                depth = d,
+                eta = e
+            )
+        )
+    }
+}
+
+ggplot(grid_result, aes(x=depth, col=as.factor(eta), y=test_f1)) +
+    geom_line() +
+    geom_point(aes(size=best_iter)) +
+    theme_bw()
+
+best_vals <- grid_result[which.max(grid_result$test_f1),]
+
+xgmodel <- xgb.train(
+    data =  dtrain,
+    nrounds = best_vals$best_iter,
+    #nfold = 10,
+    verbose = 2,
+    feval = eval_metric,
+    objective = objective,
+    max_depth = best_vals$depth,
+    eta = best_vals$eta,                               
+    #subsample = 0.9,
+    #"colsample_bytree" = 0.9,
+    print_every_n = 10, 
+    #"min_child_weight" = 1,
+    booster = booster,
+    #early_stopping_rounds = 100,
+    watchlist = list(train = dtrain),
+    maximize = TRUE
 )
 ```
 
-```{r evaluate_neuralnet}
-nn.predict <- data.frame(compute(nn, testset)$net.result)
-colnames(nn.predict) <- c("approved", "rejected")
-results <- data.frame(
-  actual = subset(testset, select = "label"), 
-  prediction = nn.predict$net.result
-)
-roundedresults <- sapply(results, round, digits=0)
-roundedresultsdf <- data.frame(roundedresults)
-attach(roundedresultsdf)
-table(label,prediction)
+### Evaluation
+
+```{r evaluate_xgboost, eval=FALSE, echo=TRUE}
+train_predictions <- predict(xgmodel, dtrain)
+threshold_f1 <- function(threshold){
+    return(f1Score(renum(trainset$label), ifelse(train_predictions > threshold, 1, 0)))
+}
+optimum_threshold <- optimize(threshold_f1, interval=c(0,1), maximum = TRUE)
+train_predictions <- ifelse(train_predictions > optimum_threshold$maximum, 1, 0)
+test_predictions <- ifelse(predict(xgmodel, dtest) > optimum_threshold$maximum, 1, 0)
+print(paste0("Train F1: ", f1Score(renum(trainset$label), train_predictions)))
+print(paste0("Test F1: ", f1Score(renum(testset$label), test_predictions)))
 ```
 
 
-```{r case_officer_sex_plots}
+# Appendix
+## Plots
+
+```{r case_officer_sex_plots, echo=TRUE}
 data_plot <- data
 data_plot[, Case.Officer.Sex := ifelse(Case.Officer.Male >0.5, "Male", "Female")]
-data_plot <- data_plot[, .(percent = sum(label)*100/.N, cases = .N, success = sum(label)), by=c("Case.Officer.Sex")]
+data_plot <- data_plot[label %in% c(0, 1), .(percent = sum(label)*100/.N, cases = .N, success = sum(label)), by=c("Case.Officer.Sex")]
 ggplot(data_plot, aes(x=Case.Officer.Sex, y=percent)) +
     geom_bar(stat="identity", fill="Navy") +
     geom_label(aes(label=paste(cases, "cases"))) +
@@ -120,7 +502,7 @@ ggplot(data_plot, aes(x=Case.Officer.Sex, y=percent)) +
     labs(x="Case officer sex", y="Applications approved (%)", title="Application approval by sex")
 ```
 
-```{r ggally}
+```{r ggally, eval=FALSE, echo=TRUE}
 data_gally <- data[,c("Application.Type", "Case.Officer", "Ward", "Case.Officer.Male", "Applicant.Male", "Using.Agent", "label")]
 data_gally[, Case.Officer.Male := Case.Officer.Male > 0.5]
 data_gally[, Applicant.Male := Applicant.Male > 0.5]
