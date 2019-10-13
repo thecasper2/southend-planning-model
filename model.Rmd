@@ -21,7 +21,7 @@ library(ModelMetrics)
 library(neuralnet)
 library(tm)
 library(xgboost)
-knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='figures/', echo=TRUE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(fig.width=8, fig.height=6, fig.path='figures/', echo=TRUE, warning=FALSE, message=FALSE)
 ```
 
 # Introduction
@@ -358,7 +358,7 @@ The F1 scores for the baseline methods are:
 
 We firstly want to do a sanity check, we wish to check that as we increase the size of our dataset, our F1 score on out-of-sample data (data we didn't use to train the model) improves.
 
-```{r increasing_dataset, eval=FALSE, echo=TRUE}
+```{r learning_curves, echo=TRUE}
 set.seed(34)
 score_by_length <- data.frame()
 for(i in seq(100,2408,50)){
@@ -375,19 +375,18 @@ for(i in seq(100,2408,50)){
             linear.output=FALSE,
             threshold=0.5,
             stepmax = 500000,
-            #learningrate.limit = c(0.1, 1),
             rep=5
         )
         f1_train <- c(f1_train, evaluate_nn(nn_length, trainset_cv[[1]]))
         f1_cv <- c(f1_cv, evaluate_nn(nn_length, trainset_cv[[2]]))
-        cat("\r", k, " fold")
+        # cat("\r", k, " fold")
     }
     f1_train <- mean(f1_train)
     f1_cv <- mean(f1_cv)
     score_by_length <- rbind(
         score_by_length, data.frame(length=i, train=f1_train, test=f1_cv)
     )
-    cat(i, " rows")
+    # cat(i, " rows")
 }
 plot_score <- melt(score_by_length, id="length")
 ggplot(plot_score, aes(x=length, y=value, col=variable)) +
@@ -429,7 +428,7 @@ for(layers in cv_variables$n_hidden_layers){
             current_f1 <- c()
             best_fold_f1 <- 0
             for(k in 1:cv_variables$kfolds){
-                cat("\r", k, "/", cv_variables$kfolds, " folds")
+                # cat("\r", k, "/", cv_variables$kfolds, " folds")
                 # Split data into test and cv
                 split_data_cv <- random_split(
                     trainset,
@@ -461,8 +460,8 @@ for(layers in cv_variables$n_hidden_layers){
             if(avg_f1 > best_f1){
                 best_f1 <- avg_f1
                 best_nn <- best_nn_from_fold
-                cat("\n")
-                print("New best model: ")
+                # cat("\n")
+                # print("New best model: ")
             }
             # Store results
             current_results <- data.frame(
@@ -475,16 +474,16 @@ for(layers in cv_variables$n_hidden_layers){
             )
             results_df <- rbind(results_df, current_results)
             # Print results
-            cat("\n")
-            print(
-                paste0(
-                    "Avg F1: ", round(avg_f1, 3),
-                    " best f1: ", round(max_f1,3),
-                    ", layers: ", layers,
-                    ", nodes: ", nodes,
-                    ", learnrate: ", learnrate
-                )
-            )
+            # cat("\n")
+            # print(
+            #     paste0(
+            #         "Avg F1: ", round(avg_f1, 3),
+            #         " best f1: ", round(max_f1,3),
+            #         ", layers: ", layers,
+            #         ", nodes: ", nodes,
+            #         ", learnrate: ", learnrate
+            #     )
+            # )
         }
     }
 }
@@ -508,7 +507,7 @@ Here we evaluate our neural network.
 best_nn_f1_score_test <- evaluate_nn(best_nn, testset)
 ```
 
-The F1 score of our best neural network is `r round(best_nn_f1_score_test, 3)`.
+The F1 score of our best neural network is *`r round(best_nn_f1_score_test, 3)`*.
 
 It is likely we can do better with our next model.
 
@@ -541,7 +540,7 @@ booster = "gbtree"
 
 # Gridsearch best params
 depth <- c(3, 4, 5, 6, 7, 8)
-eta <- c(0.05, 0.075, 0.1)
+eta <- c(0.025, 0.05, 0.075, 0.1)
 
 grid_result <- data.frame()
 for(d in depth){
@@ -598,7 +597,7 @@ xgmodel <- xgb.train(
 
 This plot shows the F1 score for a range of options. We can see which depth and ETA (training rate) give the best results, and how many training iterations it took to get there.
 
-For interest, our best depth was `r best_vals$depth`, our best ETA was `r best_vals$eta`, and the F1 score on the cross-validation data was `r round(best_vals$test_f1, 3)`
+For interest, our best depth was *`r best_vals$depth`*, our best ETA was *`r best_vals$eta`*, and the F1 score on the cross-validation data was *`r round(best_vals$test_f1, 3)`*.
 
 ### Evaluation
 
@@ -614,7 +613,7 @@ train_f1_score <- f1Score(renum(trainset$label), train_predictions)
 test_f1_score <- f1Score(renum(testset$label), test_predictions)
 ```
 
-From our XGBoost model we obtain an F1 score on test data of `r round(test_f1_score, 3)`.
+From our XGBoost model we obtain an F1 score on test data of *`r round(test_f1_score, 3)`*.
 
 ### Feature importance
 
